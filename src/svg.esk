@@ -1,0 +1,761 @@
+// <svg>: vector drawings from SVG text, for apps on eskiu-lang/ui. Svg draws a document
+// (an icon, a piece, a silhouette) scaled to fit its box, drawn by the platform (Core
+// Graphics on iOS, Canvas on Android, the browser's SVG on the web).
+//
+//     const string kHeart = "<svg viewBox=\"0 0 24 24\"><path d=\"M12 21 3 12a5 5 0 0 1 9-7 5 5 0 0 1 9 7z\"/></svg>";
+//     Svg(Style{width: 24, height: 24, color: kit.accent}, kHeart);
+//
+// What is drawn: <path>, <rect>, <circle>, <ellipse>, <line>, <polyline> and <polygon>, in
+// <svg> and <g>, with fill, stroke, stroke-width, opacity, fill-opacity, stroke-opacity,
+// fill-rule, stroke-linecap, stroke-linejoin, stroke-miterlimit, display, visibility and
+// transform, as attributes or in a style attribute. Colors are #rgb, #rgba, #rrggbb,
+// #rrggbbaa, rgb(), rgba(), the basic names, none and currentColor (Style.color). Gradients,
+// patterns, text, <use>, clipping and masks are not drawn (a url() paint is its fallback
+// color, else none).
+import <string>;
+import <list>;
+import <math>;
+import <mem>;
+import <ui>;
+
+extern double sin(double x);
+extern double cos(double x);
+extern double tan(double x);
+extern double atan2(double y, double x);
+
+const double kSvgPi = 3.14159265358979323846;
+
+// An affine transform as SVG writes it: x' = a x + c y + e, y' = b x + d y + f.
+struct SvgMatrix { double a = 1; double b; double c; double d = 1; double e; double f; }
+
+// `m` after `n`: the transform that applies `n` first.
+SvgMatrix svg_multiply(SvgMatrix m, SvgMatrix n) {
+    return SvgMatrix{m.a * n.a + m.c * n.b, m.b * n.a + m.d * n.b, m.a * n.c + m.c * n.d,
+                     m.b * n.c + m.d * n.d, m.a * n.e + m.c * n.f + m.e, m.b * n.e + m.d * n.f + m.f};
+}
+
+enum SvgPaintKind { SvgNone, SvgColor, SvgCurrent }
+
+// What an element draws with, inherited from its parent.
+struct SvgPaint {
+    int fill_kind = 1; int64 fill = 0x000000ff;
+    int stroke_kind; int64 stroke;
+    double stroke_width = 1; double opacity = 1; double fill_opacity = 1; double stroke_opacity = 1;
+    bool evenodd; int cap; int join; double miter = 4;
+    bool hidden;
+    SvgMatrix m;
+}
+
+// The display list being written: a "V minx miny width height" line, then for each shape a
+// paint line and a path line (absolute M, L, C, Q and Z, in viewBox units).
+struct SvgOut {
+    String text;
+    SvgMatrix m;
+    bool started;
+    double width; double height;
+}
+
+void svg_point(SvgOut* o, string command, double x, double y) {
+    double tx = o.m.a * x + o.m.c * y + o.m.e;
+    double ty = o.m.b * x + o.m.d * y + o.m.f;
+    // Rounding left by the trigonometry ("8.88e-16") is 0.
+    if (fabs(tx) < 1e-9) { tx = 0.0; }
+    if (fabs(ty) < 1e-9) { ty = 0.0; }
+    String_appendf(&o.text, "%s%.6g %.6g", command, tx, ty);
+}
+
+void svg_move(SvgOut* o, double x, double y) { svg_point(o, o.started ? " M" : "M", x, y); o.started = true; }
+void svg_line(SvgOut* o, double x, double y) { svg_point(o, " L", x, y); }
+void svg_close(SvgOut* o) { String_append(&o.text, " Z"); }
+
+void svg_cubic(SvgOut* o, double x1, double y1, double x2, double y2, double x, double y) {
+    svg_point(o, " C", x1, y1); svg_point(o, " ", x2, y2); svg_point(o, " ", x, y);
+}
+
+void svg_quad(SvgOut* o, double x1, double y1, double x, double y) {
+    svg_point(o, " Q", x1, y1); svg_point(o, " ", x, y);
+}
+
+// An elliptical arc from (x1, y1) to (x2, y2) as cubics, each at most a quarter turn (the
+// SVG spec's endpoint to center conversion, F.6.5).
+void svg_arc(SvgOut* o, double x1, double y1, double rx, double ry, double degrees, bool large, bool sweep,
+             double x2, double y2) {
+    if (x1 == x2 && y1 == y2) { return; }
+    rx = fabs(rx); ry = fabs(ry);
+    if (rx == 0.0 || ry == 0.0) { svg_line(o, x2, y2); return; }
+    double phi = degrees * kSvgPi / 180.0;
+    double cp = cos(phi); double sp = sin(phi);
+    double dx = (x1 - x2) / 2.0; double dy = (y1 - y2) / 2.0;
+    double xp = cp * dx + sp * dy; double yp = -sp * dx + cp * dy;
+    double lambda = (xp * xp) / (rx * rx) + (yp * yp) / (ry * ry);
+    if (lambda > 1.0) { double s = sqrt(lambda); rx *= s; ry *= s; }
+    double num = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp;
+    double den = rx * rx * yp * yp + ry * ry * xp * xp;
+    double coef = den == 0.0 || num <= 0.0 ? 0.0 : sqrt(num / den);
+    if (large == sweep) { coef = -coef; }
+    double cxp = coef * rx * yp / ry; double cyp = -coef * ry * xp / rx;
+    double cx = cp * cxp - sp * cyp + (x1 + x2) / 2.0;
+    double cy = sp * cxp + cp * cyp + (y1 + y2) / 2.0;
+    double theta = atan2((yp - cyp) / ry, (xp - cxp) / rx);
+    double delta = atan2((-yp - cyp) / ry, (-xp - cxp) / rx) - theta;
+    if (!sweep && delta > 0.0) { delta -= 2.0 * kSvgPi; }
+    if (sweep && delta < 0.0) { delta += 2.0 * kSvgPi; }
+    int segments = (int)ceil(fabs(delta) / (kSvgPi / 2.0) - 1e-9);
+    if (segments < 1) { segments = 1; }
+    double step = delta / segments;
+    double t = 4.0 / 3.0 * tan(step / 4.0);
+    for (i in 0..segments) {
+        double a1 = theta + i * step; double a2 = a1 + step;
+        double c1 = cos(a1); double s1 = sin(a1); double c2 = cos(a2); double s2 = sin(a2);
+        double ux1 = c1 - t * s1; double uy1 = s1 + t * c1;
+        double ux2 = c2 + t * s2; double uy2 = s2 - t * c2;
+        svg_cubic(o, cx + rx * ux1 * cp - ry * uy1 * sp, cy + rx * ux1 * sp + ry * uy1 * cp,
+                  cx + rx * ux2 * cp - ry * uy2 * sp, cy + rx * ux2 * sp + ry * uy2 * cp,
+                  cx + rx * c2 * cp - ry * s2 * sp, cy + rx * c2 * sp + ry * s2 * cp);
+    }
+}
+
+// ---- Numbers ----
+
+struct SvgScan { string s; int at; }
+
+bool svg_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+bool svg_digit(char c) { return c >= '0' && c <= '9'; }
+
+// Whitespace and at most one comma.
+void svg_skip(SvgScan* sc) {
+    while (svg_space(sc.s[sc.at])) { sc.at++; }
+    if (sc.s[sc.at] == ',') { sc.at++; while (svg_space(sc.s[sc.at])) { sc.at++; } }
+}
+
+bool svg_number(SvgScan* sc, *double out) {
+    svg_skip(sc);
+    string s = sc.s;
+    int i = sc.at;
+    double sign = 1.0;
+    if (s[i] == '+' || s[i] == '-') { if (s[i] == '-') { sign = -1.0; } i++; }
+    double value = 0.0;
+    bool digits = false;
+    while (svg_digit(s[i])) { value = value * 10.0 + (s[i] - '0'); i++; digits = true; }
+    if (s[i] == '.') {
+        i++;
+        double scale = 0.1;
+        while (svg_digit(s[i])) { value += (s[i] - '0') * scale; scale /= 10.0; i++; digits = true; }
+    }
+    if (!digits) { return false; }
+    if (s[i] == 'e' || s[i] == 'E') {
+        int j = i + 1;
+        double esign = 1.0;
+        if (s[j] == '+' || s[j] == '-') { if (s[j] == '-') { esign = -1.0; } j++; }
+        if (svg_digit(s[j])) {
+            int e = 0;
+            while (svg_digit(s[j])) { if (e < 400) { e = e * 10 + (s[j] - '0'); } j++; }
+            value *= pow(10.0, esign * e);
+            i = j;
+        }
+    }
+    *out = sign * value;
+    sc.at = i;
+    return true;
+}
+
+// An arc's flag: one 0 or 1, which may run into the next number ("a1 1 0 01 1 1").
+bool svg_flag(SvgScan* sc, *bool out) {
+    svg_skip(sc);
+    char c = sc.s[sc.at];
+    if (c != '0' && c != '1') { return false; }
+    *out = c == '1';
+    sc.at++;
+    return true;
+}
+
+// The number `text` starts with, or `fallback` (lengths: "24px" is 24).
+double svg_length(string text, double fallback) {
+    if (text == null) { return fallback; }
+    SvgScan sc = SvgScan{text, 0};
+    double value = 0.0;
+    return svg_number(&sc, &value) ? value : fallback;
+}
+
+// ---- Path data ----
+
+// `d` as absolute moves, lines, cubics and quadratics. Parsing stops at the first error,
+// keeping what came before it, as browsers do.
+void svg_path(SvgOut* o, string d) {
+    SvgScan sc = SvgScan{d, 0};
+    char command = 0;
+    double cx = 0.0; double cy = 0.0; double sx = 0.0; double sy = 0.0;
+    // The last control point, for S and T, and the kind of curve that left it.
+    double qx = 0.0; double qy = 0.0; char last = 0;
+    while (true) {
+        svg_skip(&sc);
+        char c = d[sc.at];
+        if (c == 0) { break; }
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            command = c;
+            sc.at++;
+            if (c == 'Z' || c == 'z') {
+                svg_close(o);
+                cx = sx; cy = sy; last = 0;
+                continue;
+            }
+        } else if (command == 0 || command == 'Z' || command == 'z') { break; }
+        bool rel = command >= 'a';
+        char up = rel ? (char)(command - 32) : command;
+        double ox = rel ? cx : 0.0; double oy = rel ? cy : 0.0;
+        double x = 0.0; double y = 0.0; double x1 = 0.0; double y1 = 0.0; double x2 = 0.0; double y2 = 0.0;
+        if (up == 'M') {
+            if (!svg_number(&sc, &x) || !svg_number(&sc, &y)) { break; }
+            cx = ox + x; cy = oy + y; sx = cx; sy = cy;
+            svg_move(o, cx, cy);
+            // Pairs after a move are lines.
+            command = rel ? 'l' : 'L';
+            last = 0;
+        } else if (up == 'L') {
+            if (!svg_number(&sc, &x) || !svg_number(&sc, &y)) { break; }
+            cx = ox + x; cy = oy + y;
+            svg_line(o, cx, cy);
+            last = 0;
+        } else if (up == 'H') {
+            if (!svg_number(&sc, &x)) { break; }
+            cx = ox + x;
+            svg_line(o, cx, cy);
+            last = 0;
+        } else if (up == 'V') {
+            if (!svg_number(&sc, &y)) { break; }
+            cy = oy + y;
+            svg_line(o, cx, cy);
+            last = 0;
+        } else if (up == 'C' || up == 'S') {
+            if (up == 'C') {
+                if (!svg_number(&sc, &x1) || !svg_number(&sc, &y1)) { break; }
+                x1 += ox; y1 += oy;
+            } else {
+                x1 = last == 'C' ? 2.0 * cx - qx : cx;
+                y1 = last == 'C' ? 2.0 * cy - qy : cy;
+            }
+            if (!svg_number(&sc, &x2) || !svg_number(&sc, &y2) || !svg_number(&sc, &x) || !svg_number(&sc, &y)) { break; }
+            x2 += ox; y2 += oy; x += ox; y += oy;
+            svg_cubic(o, x1, y1, x2, y2, x, y);
+            qx = x2; qy = y2; cx = x; cy = y; last = 'C';
+        } else if (up == 'Q' || up == 'T') {
+            if (up == 'Q') {
+                if (!svg_number(&sc, &x1) || !svg_number(&sc, &y1)) { break; }
+                x1 += ox; y1 += oy;
+            } else {
+                x1 = last == 'Q' ? 2.0 * cx - qx : cx;
+                y1 = last == 'Q' ? 2.0 * cy - qy : cy;
+            }
+            if (!svg_number(&sc, &x) || !svg_number(&sc, &y)) { break; }
+            x += ox; y += oy;
+            svg_quad(o, x1, y1, x, y);
+            qx = x1; qy = y1; cx = x; cy = y; last = 'Q';
+        } else if (up == 'A') {
+            double rx = 0.0; double ry = 0.0; double rotation = 0.0;
+            bool large = false; bool sweep = false;
+            if (!svg_number(&sc, &rx) || !svg_number(&sc, &ry) || !svg_number(&sc, &rotation) ||
+                !svg_flag(&sc, &large) || !svg_flag(&sc, &sweep) || !svg_number(&sc, &x) || !svg_number(&sc, &y)) { break; }
+            svg_arc(o, cx, cy, rx, ry, rotation, large, sweep, ox + x, oy + y);
+            cx = ox + x; cy = oy + y; last = 0;
+        } else { break; }
+    }
+}
+
+// ---- Shapes ----
+
+void svg_rect(SvgOut* o, double x, double y, double w, double h, double rx, double ry) {
+    if (w <= 0.0 || h <= 0.0) { return; }
+    if (rx < 0.0) { rx = ry < 0.0 ? 0.0 : ry; }
+    if (ry < 0.0) { ry = rx; }
+    if (rx > w / 2.0) { rx = w / 2.0; }
+    if (ry > h / 2.0) { ry = h / 2.0; }
+    if (rx == 0.0 || ry == 0.0) {
+        svg_move(o, x, y); svg_line(o, x + w, y); svg_line(o, x + w, y + h); svg_line(o, x, y + h); svg_close(o);
+        return;
+    }
+    svg_move(o, x + rx, y);
+    svg_line(o, x + w - rx, y);
+    svg_arc(o, x + w - rx, y, rx, ry, 0.0, false, true, x + w, y + ry);
+    svg_line(o, x + w, y + h - ry);
+    svg_arc(o, x + w, y + h - ry, rx, ry, 0.0, false, true, x + w - rx, y + h);
+    svg_line(o, x + rx, y + h);
+    svg_arc(o, x + rx, y + h, rx, ry, 0.0, false, true, x, y + h - ry);
+    svg_line(o, x, y + ry);
+    svg_arc(o, x, y + ry, rx, ry, 0.0, false, true, x + rx, y);
+    svg_close(o);
+}
+
+void svg_ellipse(SvgOut* o, double cx, double cy, double rx, double ry) {
+    if (rx <= 0.0 || ry <= 0.0) { return; }
+    svg_move(o, cx + rx, cy);
+    svg_arc(o, cx + rx, cy, rx, ry, 0.0, false, true, cx, cy + ry);
+    svg_arc(o, cx, cy + ry, rx, ry, 0.0, false, true, cx - rx, cy);
+    svg_arc(o, cx - rx, cy, rx, ry, 0.0, false, true, cx, cy - ry);
+    svg_arc(o, cx, cy - ry, rx, ry, 0.0, false, true, cx + rx, cy);
+    svg_close(o);
+}
+
+void svg_points(SvgOut* o, string points, bool closed) {
+    if (points == null) { return; }
+    SvgScan sc = SvgScan{points, 0};
+    double x = 0.0; double y = 0.0;
+    bool first = true;
+    while (svg_number(&sc, &x) && svg_number(&sc, &y)) {
+        if (first) { svg_move(o, x, y); first = false; } else { svg_line(o, x, y); }
+    }
+    if (!first && closed) { svg_close(o); }
+}
+
+// ---- Paint ----
+
+// `text` without the blanks around it, in `out`.
+void svg_trim(string text, String* out) {
+    String_clear(out);
+    if (text == null) { return; }
+    int start = 0;
+    while (svg_space(text[start])) { start++; }
+    int end = (int)strlen(text);
+    while (end > start && svg_space(text[end - 1])) { end--; }
+    for (int i = start; i < end; i++) { String_push(out, text[i]); }
+}
+
+int svg_hex_digit(char c) {
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+    return -1;
+}
+
+int64 svg_rgba(int r, int g, int b, int a) {
+    return ((int64)(r & 255) << 24) | ((int64)(g & 255) << 16) | ((int64)(b & 255) << 8) | (int64)(a & 255);
+}
+
+// The basic color keywords (CSS level 1) and a few common ones.
+int64 svg_named(string name) {
+    string[24] names = {"black", "white", "red", "green", "blue", "yellow", "orange", "purple", "gray", "grey",
+                        "silver", "maroon", "navy", "teal", "olive", "lime", "aqua", "cyan", "fuchsia", "magenta",
+                        "pink", "brown", "gold", "transparent"};
+    int64[24] values = {0x000000ff, 0xffffffff, 0xff0000ff, 0x008000ff, 0x0000ffff, 0xffff00ff, 0xffa500ff,
+                        0x800080ff, 0x808080ff, 0x808080ff, 0xc0c0c0ff, 0x800000ff, 0x000080ff, 0x008080ff,
+                        0x808000ff, 0x00ff00ff, 0x00ffffff, 0x00ffffff, 0xff00ffff, 0xff00ffff, 0xffc0cbff,
+                        0xa52a2aff, 0xffd700ff, 0x00000000};
+    for (i in 0..24) {
+        if (strcasecmp(name, names[i]) == 0) { return values[i]; }
+    }
+    return -1;
+}
+
+extern int strcasecmp(string a, string b);
+
+// A paint value: none, currentColor, a color, or url(...) with its fallback. False when it is
+// not one (the property keeps what it had).
+bool svg_parse_paint(string value, *int kind, *int64 color) {
+    String text;
+    defer String_free(&text);
+    svg_trim(value, &text);
+    string v = text.data;
+    if (v == null || v[0] == 0) { return false; }
+    if (strncmp(v, "url(", 4) == 0) {
+        int close = 0;
+        while (v[close] != 0 && v[close] != ')') { close++; }
+        if (v[close] == 0) { return false; }
+        string rest = &v[close + 1];
+        while (svg_space(rest[0])) { rest = &rest[1]; }
+        if (rest[0] == 0) { *kind = SvgNone; return true; }
+        return svg_parse_paint(rest, kind, color);
+    }
+    if (strcmp(v, "none") == 0) { *kind = SvgNone; return true; }
+    if (strcasecmp(v, "currentColor") == 0) { *kind = SvgCurrent; return true; }
+    if (v[0] == '#') {
+        int n = (int)strlen(v) - 1;
+        int[8] h;
+        for (int i = 0; i < n && i < 8; i++) { h[i] = svg_hex_digit(v[i + 1]); if (h[i] < 0) { return false; } }
+        if (n == 3 || n == 4) {
+            *color = svg_rgba(h[0] * 17, h[1] * 17, h[2] * 17, n == 4 ? h[3] * 17 : 255);
+        } else if (n == 6 || n == 8) {
+            *color = svg_rgba(h[0] * 16 + h[1], h[2] * 16 + h[3], h[4] * 16 + h[5], n == 8 ? h[6] * 16 + h[7] : 255);
+        } else { return false; }
+        *kind = SvgColor;
+        return true;
+    }
+    if (strncmp(v, "rgb(", 4) == 0 || strncmp(v, "rgba(", 5) == 0) {
+        SvgScan sc = SvgScan{v, v[3] == 'a' ? 5 : 4};
+        int[3] channels;
+        for (i in 0..3) {
+            double c = 0.0;
+            if (!svg_number(&sc, &c)) { return false; }
+            if (v[sc.at] == '%') { c = c * 2.55; sc.at++; }
+            channels[i] = (int)(c < 0.0 ? 0.0 : c > 255.0 ? 255.0 : c + 0.5);
+        }
+        double alpha = 1.0;
+        while (svg_space(v[sc.at])) { sc.at++; }
+        if (v[sc.at] == ',' || v[sc.at] == '/') {
+            sc.at++;
+            if (!svg_number(&sc, &alpha)) { return false; }
+            if (v[sc.at] == '%') { alpha = alpha / 100.0; }
+        }
+        alpha = alpha < 0.0 ? 0.0 : alpha > 1.0 ? 1.0 : alpha;
+        *color = svg_rgba(channels[0], channels[1], channels[2], (int)(alpha * 255.0 + 0.5));
+        *kind = SvgColor;
+        return true;
+    }
+    int64 named = svg_named(v);
+    if (named < 0) { return false; }
+    *kind = SvgColor;
+    *color = named;
+    return true;
+}
+
+double svg_unit(string value, double fallback) {
+    double v = svg_length(value, fallback);
+    if (value != null && strchr(value, '%') != null) { v = v / 100.0; }
+    return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+}
+
+// A transform list ("translate(4 2) rotate(45 12 12)") after `m`.
+SvgMatrix svg_transform(SvgMatrix m, string text) {
+    SvgScan sc = SvgScan{text, 0};
+    while (true) {
+        while (svg_space(text[sc.at]) || text[sc.at] == ',') { sc.at++; }
+        int start = sc.at;
+        while ((text[sc.at] >= 'a' && text[sc.at] <= 'z') || (text[sc.at] >= 'A' && text[sc.at] <= 'Z')) { sc.at++; }
+        int length = sc.at - start;
+        while (svg_space(text[sc.at])) { sc.at++; }
+        if (length == 0 || text[sc.at] != '(') { return m; }
+        sc.at++;
+        double[6] v;
+        int n = 0;
+        while (n < 6 && svg_number(&sc, &v[n])) { n++; }
+        while (svg_space(text[sc.at])) { sc.at++; }
+        if (text[sc.at] != ')') { return m; }
+        sc.at++;
+        string name = &text[start];
+        SvgMatrix t;
+        if (strncmp(name, "matrix", 6) == 0 && length == 6 && n == 6) {
+            t = SvgMatrix{v[0], v[1], v[2], v[3], v[4], v[5]};
+        } else if (strncmp(name, "translate", 9) == 0 && length == 9 && n >= 1) {
+            t = SvgMatrix{1.0, 0.0, 0.0, 1.0, v[0], n >= 2 ? v[1] : 0.0};
+        } else if (strncmp(name, "scale", 5) == 0 && length == 5 && n >= 1) {
+            t = SvgMatrix{v[0], 0.0, 0.0, n >= 2 ? v[1] : v[0], 0.0, 0.0};
+        } else if (strncmp(name, "rotate", 6) == 0 && length == 6 && n >= 1) {
+            double r = v[0] * kSvgPi / 180.0;
+            t = SvgMatrix{cos(r), sin(r), -sin(r), cos(r), 0.0, 0.0};
+            if (n >= 3) {
+                SvgMatrix there = SvgMatrix{1.0, 0.0, 0.0, 1.0, v[1], v[2]};
+                SvgMatrix back = SvgMatrix{1.0, 0.0, 0.0, 1.0, -v[1], -v[2]};
+                t = svg_multiply(svg_multiply(there, t), back);
+            }
+        } else if (strncmp(name, "skewX", 5) == 0 && length == 5 && n >= 1) {
+            t = SvgMatrix{1.0, 0.0, tan(v[0] * kSvgPi / 180.0), 1.0, 0.0, 0.0};
+        } else if (strncmp(name, "skewY", 5) == 0 && length == 5 && n >= 1) {
+            t = SvgMatrix{1.0, tan(v[0] * kSvgPi / 180.0), 0.0, 1.0, 0.0, 0.0};
+        } else { return m; }
+        m = svg_multiply(m, t);
+    }
+    return m;
+}
+
+// One presentation property, from an attribute or the style attribute.
+void svg_property(SvgPaint* p, string name, string value) {
+    if (strcmp(name, "fill") == 0) { svg_parse_paint(value, &p.fill_kind, &p.fill); }
+    else if (strcmp(name, "stroke") == 0) { svg_parse_paint(value, &p.stroke_kind, &p.stroke); }
+    else if (strcmp(name, "stroke-width") == 0) { p.stroke_width = svg_length(value, p.stroke_width); }
+    else if (strcmp(name, "opacity") == 0) { p.opacity = p.opacity * svg_unit(value, 1.0); }
+    else if (strcmp(name, "fill-opacity") == 0) { p.fill_opacity = svg_unit(value, 1.0); }
+    else if (strcmp(name, "stroke-opacity") == 0) { p.stroke_opacity = svg_unit(value, 1.0); }
+    else if (strcmp(name, "fill-rule") == 0) { p.evenodd = strstr(value, "evenodd") != null; }
+    else if (strcmp(name, "stroke-linecap") == 0) {
+        p.cap = strstr(value, "round") != null ? 1 : strstr(value, "square") != null ? 2 : 0;
+    } else if (strcmp(name, "stroke-linejoin") == 0) {
+        p.join = strstr(value, "round") != null ? 1 : strstr(value, "bevel") != null ? 2 : 0;
+    } else if (strcmp(name, "stroke-miterlimit") == 0) { p.miter = svg_length(value, p.miter); }
+    else if (strcmp(name, "display") == 0) { if (strstr(value, "none") != null) { p.hidden = true; } }
+    else if (strcmp(name, "visibility") == 0) { p.hidden = strstr(value, "hidden") != null || strstr(value, "collapse") != null; }
+}
+
+// "fill: red; stroke-width: 2".
+void svg_style(SvgPaint* p, string style) {
+    String name;
+    defer String_free(&name);
+    String value;
+    defer String_free(&value);
+    int at = 0;
+    while (style[at] != 0) {
+        int end = at;
+        while (style[end] != 0 && style[end] != ';') { end++; }
+        int colon = at;
+        while (colon < end && style[colon] != ':') { colon++; }
+        if (colon < end) {
+            String raw;
+            for (int i = at; i < colon; i++) { String_push(&raw, style[i]); }
+            svg_trim(raw.data, &name);
+            String_clear(&raw);
+            for (int i = colon + 1; i < end; i++) { String_push(&raw, style[i]); }
+            svg_trim(raw.data, &value);
+            String_free(&raw);
+            if (name.data != null && value.data != null) { svg_property(p, name.data, value.data); }
+        }
+        at = style[end] == 0 ? end : end + 1;
+    }
+}
+
+void svg_hex(String* out, int64 rgba) {
+    string digits = "0123456789abcdef";
+    for (int shift = 28; shift >= 0; shift -= 4) { String_push(out, digits[(int)((rgba >> shift) & 15)]); }
+}
+
+// A paint for the display list: "-" none, "c" and the alpha (two hex digits) for currentColor,
+// else RRGGBBAA, its alpha times `alpha`.
+void svg_paint_out(String* out, int kind, int64 color, double alpha) {
+    if (kind == SvgNone) { String_append(out, "-"); return; }
+    int a = kind == SvgCurrent ? 255 : (int)(color & 255);
+    a = (int)(a * alpha + 0.5);
+    if (kind == SvgCurrent) {
+        String_append(out, "c");
+        string digits = "0123456789abcdef";
+        String_push(out, digits[(a >> 4) & 15]); String_push(out, digits[a & 15]);
+        return;
+    }
+    svg_hex(out, (color & ~(int64)255) | (int64)a);
+}
+
+// ---- The document ----
+
+struct SvgAttr { String name; String value; }
+
+string svg_attr(List<SvgAttr>* attrs, string name) {
+    for (i in 0..attrs.size) {
+        if (String_eq_cstr(&attrs.data[i].name, name) == 1) { return attrs.data[i].value.data == null ? "" : attrs.data[i].value.data; }
+    }
+    return null;
+}
+
+bool svg_name_is(string text, int start, int end, string name) {
+    int n = (int)strlen(name);
+    return end - start == n && strncmp(&text[start], name, (size_t)n) == 0;
+}
+
+// Elements whose content is not drawn.
+bool svg_skipped(string text, int start, int end) {
+    string[16] names = {"defs", "clipPath", "mask", "pattern", "linearGradient", "radialGradient", "symbol",
+                        "title", "desc", "metadata", "style", "text", "marker", "filter", "script", "foreignObject"};
+    for (i in 0..16) { if (svg_name_is(text, start, end, names[i])) { return true; } }
+    return false;
+}
+
+// One shape, if it draws anything: its paint line, then its path line.
+void svg_shape(SvgOut* o, SvgPaint* p, string text, int start, int end, List<SvgAttr>* attrs) {
+    if (p.hidden) { return; }
+    bool fills = p.fill_kind != SvgNone && !svg_name_is(text, start, end, "line") && !svg_name_is(text, start, end, "polyline");
+    bool strokes = p.stroke_kind != SvgNone && p.stroke_width > 0.0;
+    // A polyline fills too, as in browsers.
+    if (svg_name_is(text, start, end, "polyline")) { fills = p.fill_kind != SvgNone; }
+    if (!fills && !strokes) { return; }
+    String path;
+    SvgOut shape = SvgOut{path, p.m, false, 0.0, 0.0};
+    if (svg_name_is(text, start, end, "path")) {
+        string d = svg_attr(attrs, "d");
+        if (d != null) { svg_path(&shape, d); }
+    } else if (svg_name_is(text, start, end, "rect")) {
+        svg_rect(&shape, svg_length(svg_attr(attrs, "x"), 0.0), svg_length(svg_attr(attrs, "y"), 0.0),
+                 svg_length(svg_attr(attrs, "width"), 0.0), svg_length(svg_attr(attrs, "height"), 0.0),
+                 svg_length(svg_attr(attrs, "rx"), -1.0), svg_length(svg_attr(attrs, "ry"), -1.0));
+    } else if (svg_name_is(text, start, end, "circle")) {
+        double r = svg_length(svg_attr(attrs, "r"), 0.0);
+        svg_ellipse(&shape, svg_length(svg_attr(attrs, "cx"), 0.0), svg_length(svg_attr(attrs, "cy"), 0.0), r, r);
+    } else if (svg_name_is(text, start, end, "ellipse")) {
+        svg_ellipse(&shape, svg_length(svg_attr(attrs, "cx"), 0.0), svg_length(svg_attr(attrs, "cy"), 0.0),
+                    svg_length(svg_attr(attrs, "rx"), 0.0), svg_length(svg_attr(attrs, "ry"), 0.0));
+    } else if (svg_name_is(text, start, end, "line")) {
+        svg_move(&shape, svg_length(svg_attr(attrs, "x1"), 0.0), svg_length(svg_attr(attrs, "y1"), 0.0));
+        svg_line(&shape, svg_length(svg_attr(attrs, "x2"), 0.0), svg_length(svg_attr(attrs, "y2"), 0.0));
+    } else if (svg_name_is(text, start, end, "polyline")) {
+        svg_points(&shape, svg_attr(attrs, "points"), false);
+    } else if (svg_name_is(text, start, end, "polygon")) {
+        svg_points(&shape, svg_attr(attrs, "points"), true);
+    }
+    if (shape.text.len == 0) { String_free(&shape.text); return; }
+    double scale = sqrt(fabs(p.m.a * p.m.d - p.m.b * p.m.c));
+    String_append(&o.text, "S ");
+    svg_paint_out(&o.text, fills ? p.fill_kind : SvgNone, p.fill, p.opacity * p.fill_opacity);
+    String_append(&o.text, " ");
+    svg_paint_out(&o.text, strokes ? p.stroke_kind : SvgNone, p.stroke, p.opacity * p.stroke_opacity);
+    String_appendf(&o.text, " %.6g %d %d %d %.6g\n", p.stroke_width * scale, p.evenodd ? 1 : 0, p.cap, p.join, p.miter);
+    String_append(&o.text, shape.text.data);
+    String_append(&o.text, "\n");
+    String_free(&shape.text);
+}
+
+// The root <svg>'s viewBox (else its width and height, else 100 by 100), as the first line.
+void svg_root(SvgOut* o, List<SvgAttr>* attrs) {
+    double x = 0.0; double y = 0.0;
+    double w = svg_length(svg_attr(attrs, "width"), 0.0);
+    double h = svg_length(svg_attr(attrs, "height"), 0.0);
+    string width = svg_attr(attrs, "width");
+    string height = svg_attr(attrs, "height");
+    if (width != null && strchr(width, '%') != null) { w = 0.0; }
+    if (height != null && strchr(height, '%') != null) { h = 0.0; }
+    string box = svg_attr(attrs, "viewBox");
+    if (box != null) {
+        SvgScan sc = SvgScan{box, 0};
+        double[4] v;
+        if (svg_number(&sc, &v[0]) && svg_number(&sc, &v[1]) && svg_number(&sc, &v[2]) && svg_number(&sc, &v[3]) &&
+            v[2] > 0.0 && v[3] > 0.0) {
+            x = v[0]; y = v[1]; w = v[2]; h = v[3];
+        }
+    }
+    if (w <= 0.0) { w = 100.0; }
+    if (h <= 0.0) { h = 100.0; }
+    o.width = w; o.height = h;
+    String_appendf(&o.text, "V %.6g %.6g %.6g %.6g\n", x, y, w, h);
+}
+
+// Read the attributes of the tag at `at` (just after its name) into `attrs`; the index after
+// the tag's end, and whether it closed itself.
+int svg_attributes(string text, int at, List<SvgAttr>* attrs, *bool closed) {
+    *closed = false;
+    while (true) {
+        while (svg_space(text[at])) { at++; }
+        char c = text[at];
+        if (c == 0) { return at; }
+        if (c == '>') { return at + 1; }
+        if (c == '/' && text[at + 1] == '>') { *closed = true; return at + 2; }
+        int start = at;
+        while (text[at] != 0 && text[at] != '=' && text[at] != '>' && text[at] != '/' && !svg_space(text[at])) { at++; }
+        SvgAttr attr;
+        for (int i = start; i < at; i++) { String_push(&attr.name, text[i]); }
+        while (svg_space(text[at])) { at++; }
+        if (text[at] == '=') {
+            at++;
+            while (svg_space(text[at])) { at++; }
+            char quote = text[at];
+            if (quote == '"' || quote == '\'') {
+                at++;
+                while (text[at] != 0 && text[at] != quote) { String_push(&attr.value, text[at]); at++; }
+                if (text[at] == quote) { at++; }
+            } else {
+                while (text[at] != 0 && text[at] != '>' && !svg_space(text[at])) { String_push(&attr.value, text[at]); at++; }
+            }
+        }
+        if (attr.name.len == 0) { String_free(&attr.value); at++; continue; }
+        attrs.push(attr);
+    }
+    return at;
+}
+
+void svg_free_attributes(List<SvgAttr>* attrs) {
+    for (i in 0..attrs.size) { String_free(&attrs.data[i].name); String_free(&attrs.data[i].value); }
+    attrs.size = 0;
+}
+
+// The index just past `end` from `at`, or the text's end.
+int svg_past(string text, int at, string end) {
+    string found = strstr(&text[at], end);
+    if (found == null) { return (int)strlen(text); }
+    return (int)((*char)found - (*char)text) + (int)strlen(end);
+}
+
+// `svg` (a document's text) as the display list the hosts draw, in `out`; false when it has
+// no <svg> element. `width` and `height` are its viewBox's.
+bool svg_compile(string svg, String* out, *double width, *double height) {
+    String_clear(out);
+    SvgOut o = SvgOut{*out, SvgMatrix{}, false, 0.0, 0.0};
+    List<SvgPaint> stack;
+    defer stack.free();
+    List<SvgAttr> attrs;
+    defer attrs.free();
+    defer svg_free_attributes(&attrs);
+    bool rooted = false;
+    int skip = 0;
+    int at = 0;
+    while (svg != null && svg[at] != 0) {
+        if (svg[at] != '<') { at++; continue; }
+        if (strncmp(&svg[at], "<!--", 4) == 0) { at = svg_past(svg, at, "-->"); continue; }
+        if (strncmp(&svg[at], "<![CDATA[", 9) == 0) { at = svg_past(svg, at, "]]>"); continue; }
+        if (svg[at + 1] == '?') { at = svg_past(svg, at, "?>"); continue; }
+        if (svg[at + 1] == '!') { at = svg_past(svg, at, ">"); continue; }
+        if (svg[at + 1] == '/') {
+            at = svg_past(svg, at, ">");
+            if (skip > 0) { skip--; } else if (stack.size > 0) { stack.size--; }
+            continue;
+        }
+        int start = at + 1;
+        int end = start;
+        while (svg[end] != 0 && !svg_space(svg[end]) && svg[end] != '>' && svg[end] != '/') { end++; }
+        bool closed = false;
+        svg_free_attributes(&attrs);
+        at = svg_attributes(svg, end, &attrs, &closed);
+        if (skip > 0 || svg_skipped(svg, start, end)) {
+            if (!closed) { skip++; }
+            continue;
+        }
+        SvgPaint paint;
+        if (stack.size > 0) { paint = stack.data[stack.size - 1]; }
+        if (svg_name_is(svg, start, end, "svg") && !rooted) {
+            svg_root(&o, &attrs);
+            rooted = true;
+        }
+        if (!rooted) {
+            if (!closed) { skip++; }
+            continue;
+        }
+        string transform = svg_attr(&attrs, "transform");
+        if (transform != null) { paint.m = svg_transform(paint.m, transform); }
+        string[12] names = {"fill", "stroke", "stroke-width", "opacity", "fill-opacity", "stroke-opacity", "fill-rule",
+                            "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "display", "visibility"};
+        for (i in 0..12) {
+            string value = svg_attr(&attrs, names[i]);
+            if (value != null) { svg_property(&paint, names[i], value); }
+        }
+        string style = svg_attr(&attrs, "style");
+        if (style != null) { svg_style(&paint, style); }
+        svg_shape(&o, &paint, svg, start, end, &attrs);
+        if (!closed) { stack.push(paint); }
+    }
+    *out = o.text;
+    *width = o.width;
+    *height = o.height;
+    return rooted;
+}
+
+// ---- The element ----
+
+struct SvgCache { String source; String list; double width; double height; }
+
+void svg_release(*SvgCache cache) {
+    String_free(&cache.source);
+    String_free(&cache.list);
+    free(cache);
+}
+
+// `svg` (an SVG document's text) drawn in the box `style` gives it, scaled to fit and
+// centered (the viewBox's "xMidYMid meet"); with only a width or a height, the other follows
+// the viewBox's proportions. currentColor is `style.color`, black when it is not set. The
+// document is parsed again only when its text changes.
+void Svg(Style style, string svg) {
+    static int tag;
+    *Slot slot = ui_slot(10, &tag);
+    *SvgCache cache = (*SvgCache)slot.data;
+    if (cache == null) {
+        cache = alloc<SvgCache>(1);
+        slot.data = cache;
+        slot.dispose = void() { svg_release(cache); };
+    }
+    if (cache.source.data == null || svg == null || strcmp(cache.source.data, svg) != 0) {
+        String_clear(&cache.source);
+        String_append(&cache.source, svg == null ? "" : svg);
+        if (!svg_compile(svg, &cache.list, &cache.width, &cache.height)) {
+            String_clear(&cache.list);
+            cache.width = 0.0; cache.height = 0.0;
+        }
+    }
+    if (style.aspect_ratio == 0.0 && (style.width == 0 || style.height == 0) && cache.width > 0.0 && cache.height > 0.0) {
+        style.aspect_ratio = cache.width / cache.height;
+    }
+    String color;
+    defer String_free(&color);
+    svg_hex(&color, style.color == -1 ? (int64)0x000000ff : style.color);
+    ui_native_prop("drawing", cache.list.data == null ? "" : cache.list.data);
+    ui_native_prop("color", color.data);
+    NativeView(style, "svg", void(string name, string payload) {});
+}

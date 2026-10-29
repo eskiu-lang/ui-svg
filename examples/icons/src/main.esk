@@ -1,0 +1,35 @@
+// Icons: SVG drawings from <svg>, tinted by the style's color and scaled to their boxes.
+// `ui run ios`, `ui run android` or `ui run web`.
+import <ui>;
+import <ui/kit>;
+import <svg>;
+
+const string kHeart = "<svg viewBox=\"0 0 24 24\"><path d=\"M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z\" fill=\"currentColor\"/></svg>";
+
+const string kStar = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linejoin=\"round\"><polygon points=\"12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2\"/></svg>";
+
+const string kBall = "<svg viewBox=\"0 0 100 100\"><circle cx=\"50\" cy=\"50\" r=\"46\" fill=\"#fff\" stroke=\"#222\" stroke-width=\"6\"/><path d=\"M4 50a46 46 0 0 1 92 0z\" fill=\"#e3350d\" stroke=\"#222\" stroke-width=\"6\"/><circle cx=\"50\" cy=\"50\" r=\"14\" fill=\"#fff\" stroke=\"#222\" stroke-width=\"6\"/></svg>";
+
+const string kBadge = "<svg viewBox=\"0 0 120 60\"><rect x=\"2\" y=\"2\" width=\"116\" height=\"56\" rx=\"14\" fill=\"#1d3557\"/><g transform=\"translate(60 30) rotate(45)\"><rect x=\"-12\" y=\"-12\" width=\"24\" height=\"24\" fill=\"#ffd166\"/></g><ellipse cx=\"22\" cy=\"30\" rx=\"10\" ry=\"6\" fill=\"#06d6a0\"/><line x1=\"88\" y1=\"18\" x2=\"108\" y2=\"42\" stroke=\"#ef476f\" stroke-width=\"5\" stroke-linecap=\"round\"/></svg>";
+
+void App() {
+    Column(Style{grow: 1, padding: 24, gap: 20, justify: JustifyCenter, background: kit.page}) {
+        Row(Style{gap: 16, align: AlignCenter}) {
+            Svg(Style{width: 48, height: 48, color: rgb(230, 57, 70)}, kHeart);
+            Svg(Style{width: 48, height: 48, color: rgb(69, 123, 157)}, kHeart);
+            Svg(Style{width: 48, height: 48, color: rgb(244, 162, 97)}, kStar);
+            Svg(Style{width: 48, height: 48, color: kit.ink}, kStar);
+        }
+        Row(Style{gap: 16, align: AlignCenter}) {
+            Svg(Style{width: 96, height: 96}, kBall);
+            Svg(Style{width: 160}, kBadge);
+        }
+    }
+}
+
+void ui_app_start(int which) {
+    kit_follow_system();
+    ui_mount() { App(); }
+}
+
+void ui_app_stop() {}

@@ -1,0 +1,88 @@
+// <svg> with no device: documents compiled to the display list the hosts draw, and the props
+// Svg sends. Each check that fails exits with 1.
+import <io>;
+import <string>;
+import <ui>;
+import <svg>;
+
+void expect(string svg, string list, string what) {
+    String out;
+    double w = 0.0; double h = 0.0;
+    bool ok = svg_compile(svg, &out, &w, &h);
+    if (!ok || String_eq_cstr(&out, list) != 1) {
+        printf("FAIL %s\n  got:\n%s  want:\n%s", what, out.data == null ? "" : out.data, list);
+        exit(1);
+    }
+    String_free(&out);
+}
+
+void check(bool ok, string what) {
+    if (!ok) { printf("FAIL %s\n", what); exit(1); }
+}
+
+List<String> named;
+
+int main() {
+    expect("<svg viewBox=\"0 0 24 24\"><path d=\"M2 3h4v5H2z\"/></svg>",
+        "V 0 0 24 24\nS 000000ff - 1 0 0 0 4\nM2 3 L6 3 L6 8 L2 8 Z\n", "a path, black by default");
+    expect("<svg width=\"10\" height=\"20\"><rect x=\"1\" y=\"2\" width=\"3\" height=\"4\" fill=\"#f00\" stroke=\"blue\" stroke-width=\"2\"/></svg>",
+        "V 0 0 10 20\nS ff0000ff 0000ffff 2 0 0 0 4\nM1 2 L4 2 L4 6 L1 6 Z\n", "a rect; the size without a viewBox");
+    expect("<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"5\" fill=\"currentColor\" opacity=\"0.5\"/></svg>",
+        "V 0 0 10 10\nS c80 - 1 0 0 0 4\nM10 5 C10 7.76142 7.76142 10 5 10 C2.23858 10 0 7.76142 0 5 C0 2.23858 2.23858 0 5 0 C7.76142 0 10 2.23858 10 5 Z\n",
+        "a circle in currentColor at half opacity");
+    expect("<svg viewBox=\"0 0 10 10\"><g transform=\"translate(1 2) scale(2)\" fill=\"none\" stroke=\"#000\"><line x1=\"0\" y1=\"0\" x2=\"3\" y2=\"4\"/></g></svg>",
+        "V 0 0 10 10\nS - 000000ff 2 0 0 0 4\nM1 2 L7 10\n", "a group's transform and paint; the stroke scales");
+    expect("<svg viewBox=\"0 0 10 10\"><path d=\"m1 1 2 0 0 2-2 0zM5 5q1 1 2 0t2 0c1 1 2 1 3 0s2-1 3 0a1 1 0 01 2 0\"/></svg>",
+        "V 0 0 10 10\nS 000000ff - 1 0 0 0 4\nM1 1 L3 1 L3 3 L1 3 Z M5 5 Q6 6 7 5 Q8 4 9 5 C10 6 11 6 12 5 C13 4 14 4 15 5 C15 4.44772 15.4477 4 16 4 C16.5523 4 17 4.44772 17 5\n",
+        "relative commands, implicit lines, S and T reflections, an arc with packed flags");
+    expect("<?xml version=\"1.0\"?><!-- c --><svg viewBox=\"0 0 4 4\"><defs><path d=\"M0 0L4 4\"/></defs><polygon points=\"0,0 4,0 4,4\" style=\"fill: rgb(0, 128, 255); fill-opacity: 50%\"/></svg>",
+        "V 0 0 4 4\nS 0080ff80 - 1 0 0 0 4\nM0 0 L4 0 L4 4 Z\n", "a polygon styled by its style attribute; defs and comments skipped");
+    expect("<svg viewBox=\"0 0 4 4\"><rect width=\"4\" height=\"2\" rx=\"1\"/></svg>",
+        "V 0 0 4 4\nS 000000ff - 1 0 0 0 4\nM1 0 L3 0 C3.55228 0 4 0.447715 4 1 L4 1 C4 1.55228 3.55228 2 3 2 L1 2 C0.447715 2 0 1.55228 0 1 L0 1 C0 0.447715 0.447715 0 1 0 Z\n",
+        "a rounded rect, ry from rx, clamped to half the height");
+    expect("<svg viewBox=\"0 0 8 8\"><g fill=\"url(#g) #00ff00\" stroke-linecap=\"round\" stroke-linejoin=\"bevel\"><path d=\"M0 0H8\" stroke=\"rgba(0,0,0,.25)\" fill-rule=\"evenodd\"/><path d=\"M1 1H2\" display=\"none\"/><path d=\"M1 1H2\" fill=\"url(#h)\"/></g></svg>",
+        "V 0 0 8 8\nS 00ff00ff 00000040 1 1 1 2 4\nM0 0 L8 0\n", "url() falls back to its color or none; caps, joins, rules; hidden shapes");
+    expect("<svg viewBox=\"0 0 10 10\"><path transform=\"rotate(90 5 5)\" d=\"M5 0L5 5\"/></svg>",
+        "V 0 0 10 10\nS 000000ff - 1 0 0 0 4\nM10 5 L5 5\n", "rotation about a point");
+    String out;
+    double w = 0.0; double h = 0.0;
+    check(!svg_compile("not svg", &out, &w, &h), "text without <svg> is no drawing");
+    check(!svg_compile(null, &out, &w, &h), "no text is no drawing");
+    String_free(&out);
+
+    Ui runtime;
+    ui_init(&runtime, void(*uint8 data, int len) {
+        List<Mutation> items;
+        ui_decode(data, len, &items);
+        for (i in 0..items.size) {
+            if (items.data[i].op == 11) {
+                String pair;
+                String_format(&pair, "%s=%s", items.data[i].name, items.data[i].text);
+                named.push(pair);
+            }
+            if (items.data[i].op == 2 && items.data[i].kind == 29) {
+                String pair;
+                String_format(&pair, "aspect=%d", items.data[i].before);
+                named.push(pair);
+            }
+        }
+        items.free();
+        ui_complete(ui.sequence);
+    });
+    ui_mount() {
+        Svg(Style{width: 48, color: rgb(255, 0, 0)}, "<svg viewBox=\"0 0 24 12\"><path d=\"M0 0H24\"/></svg>");
+    }
+    ui_frame();
+    bool drawing = false; bool color = false; bool aspect = false;
+    for (i in 0..named.size) {
+        if (String_eq_cstr(&named.data[i], "drawing=V 0 0 24 12\nS 000000ff - 1 0 0 0 4\nM0 0 L24 0\n") == 1) { drawing = true; }
+        if (String_eq_cstr(&named.data[i], "color=ff0000ff") == 1) { color = true; }
+        if (String_eq_cstr(&named.data[i], "aspect=2000") == 1) { aspect = true; }
+    }
+    check(drawing, "the view gets the display list");
+    check(color, "currentColor is the style's color");
+    check(aspect, "a width alone takes the viewBox's proportions");
+    ui_shutdown();
+    printf("PASS svg\n");
+    return 0;
+}
