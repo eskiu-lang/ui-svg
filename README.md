@@ -49,6 +49,14 @@ viewBox, then a paint line and a path line per shape), for tests or other render
 `examples/icons` shows tinted icons, a stroked star, arcs and transforms (`ui run ios`,
 `ui run android` or `ui run web`).
 
+
+## Install
+
+In an app made with `ui new`:
+
+```bash
+eskiuc add svg --git https://github.com/eskiu-lang/ui-svg --rev v0.1.0
+```
 ## Tests
 
 `eskiuc test` compiles documents and checks the display lists: every path command, relative
