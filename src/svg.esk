@@ -23,6 +23,7 @@ extern double cos(double x);
 extern double tan(double x);
 extern double atan2(double y, double x);
 
+// Pi, for the arc conversion.
 const double kSvgPi = 3.14159265358979323846;
 
 // An affine transform as SVG writes it: x' = a x + c y + e, y' = b x + d y + f.
@@ -34,6 +35,8 @@ SvgMatrix svg_multiply(SvgMatrix m, SvgMatrix n) {
                      m.b * n.c + m.d * n.d, m.a * n.e + m.c * n.f + m.e, m.b * n.e + m.d * n.f + m.f};
 }
 
+// How a fill or stroke paints: not at all, with a color, or with currentColor (the Svg
+// element's Style.color).
 enum SvgPaintKind { SvgNone, SvgColor, SvgCurrent }
 
 // What an element draws with, inherited from its parent.
@@ -55,6 +58,8 @@ struct SvgOut {
     double width; double height;
 }
 
+// Appends `command` and the point (x, y) mapped through the current transform, as two %.6g
+// numbers; values within 1e-9 of 0 are written as 0.
 void svg_point(SvgOut* o, string command, double x, double y) {
     double tx = o.m.a * x + o.m.c * y + o.m.e;
     double ty = o.m.b * x + o.m.d * y + o.m.f;
@@ -64,14 +69,20 @@ void svg_point(SvgOut* o, string command, double x, double y) {
     String_appendf(&o.text, "%s%.6g %.6g", command, tx, ty);
 }
 
+// Starts a new subpath at (x, y): an absolute M command.
 void svg_move(SvgOut* o, double x, double y) { svg_point(o, o.started ? " M" : "M", x, y); o.started = true; }
+// A straight line to (x, y): an absolute L command.
 void svg_line(SvgOut* o, double x, double y) { svg_point(o, " L", x, y); }
+// Closes the current subpath: a Z command.
 void svg_close(SvgOut* o) { String_append(&o.text, " Z"); }
 
+// A cubic Bezier curve to (x, y) with control points (x1, y1) and (x2, y2): an absolute C
+// command.
 void svg_cubic(SvgOut* o, double x1, double y1, double x2, double y2, double x, double y) {
     svg_point(o, " C", x1, y1); svg_point(o, " ", x2, y2); svg_point(o, " ", x, y);
 }
 
+// A quadratic Bezier curve to (x, y) with control point (x1, y1): an absolute Q command.
 void svg_quad(SvgOut* o, double x1, double y1, double x, double y) {
     svg_point(o, " Q", x1, y1); svg_point(o, " ", x, y);
 }
@@ -117,9 +128,13 @@ void svg_arc(SvgOut* o, double x1, double y1, double rx, double ry, double degre
 
 // ---- Numbers ----
 
+// A cursor over a string of numbers: the text `s` and the index `at` of the next
+// character.
 struct SvgScan { string s; int at; }
 
+// True for the SVG whitespace characters: space, tab, newline and carriage return.
 bool svg_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+// True for an ASCII digit.
 bool svg_digit(char c) { return c >= '0' && c <= '9'; }
 
 // Whitespace and at most one comma.
@@ -128,6 +143,9 @@ void svg_skip(SvgScan* sc) {
     if (sc.s[sc.at] == ',') { sc.at++; while (svg_space(sc.s[sc.at])) { sc.at++; } }
 }
 
+// Reads the next number (sign, digits, fraction, exponent), after whitespace and at most
+// one comma, into `out` and moves past it; false, with the cursor unmoved, when no number
+// follows.
 bool svg_number(SvgScan* sc, *double out) {
     svg_skip(sc);
     string s = sc.s;
@@ -263,6 +281,9 @@ void svg_path(SvgOut* o, string d) {
 
 // ---- Shapes ----
 
+// A rectangle at (x, y), `w` by `h`, with corners rounded by `rx` and `ry` (a negative one
+// takes the other's value, both are capped at half the side); nothing when `w` or `h` is
+// not positive.
 void svg_rect(SvgOut* o, double x, double y, double w, double h, double rx, double ry) {
     if (w <= 0.0 || h <= 0.0) { return; }
     if (rx < 0.0) { rx = ry < 0.0 ? 0.0 : ry; }
@@ -285,6 +306,8 @@ void svg_rect(SvgOut* o, double x, double y, double w, double h, double rx, doub
     svg_close(o);
 }
 
+// An ellipse centered at (cx, cy) with radii `rx` and `ry`, as four arcs; nothing when a
+// radius is not positive.
 void svg_ellipse(SvgOut* o, double cx, double cy, double rx, double ry) {
     if (rx <= 0.0 || ry <= 0.0) { return; }
     svg_move(o, cx + rx, cy);
@@ -295,6 +318,8 @@ void svg_ellipse(SvgOut* o, double cx, double cy, double rx, double ry) {
     svg_close(o);
 }
 
+// The `points` attribute of a polyline or polygon (x y pairs) as lines, closed when
+// `closed`; nothing when `points` is null.
 void svg_points(SvgOut* o, string points, bool closed) {
     if (points == null) { return; }
     SvgScan sc = SvgScan{points, 0};
@@ -319,6 +344,7 @@ void svg_trim(string text, String* out) {
     for (int i = start; i < end; i++) { String_push(out, text[i]); }
 }
 
+// The value of a hexadecimal digit, or -1 when `c` is not one.
 int svg_hex_digit(char c) {
     if (c >= '0' && c <= '9') { return c - '0'; }
     if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
@@ -326,6 +352,7 @@ int svg_hex_digit(char c) {
     return -1;
 }
 
+// Packs four 0 to 255 channels as 0xRRGGBBAA (each channel masked to 8 bits).
 int64 svg_rgba(int r, int g, int b, int a) {
     return ((int64)(r & 255) << 24) | ((int64)(g & 255) << 16) | ((int64)(b & 255) << 8) | (int64)(a & 255);
 }
@@ -406,6 +433,8 @@ bool svg_parse_paint(string value, *int kind, *int64 color) {
     return true;
 }
 
+// An opacity value: a number, or a percentage divided by 100, clamped to 0..1; `fallback`
+// when it does not parse.
 double svg_unit(string value, double fallback) {
     double v = svg_length(value, fallback);
     if (value != null && strchr(value, '%') != null) { v = v / 100.0; }
@@ -499,6 +528,7 @@ void svg_style(SvgPaint* p, string style) {
     }
 }
 
+// Appends `rgba` (0xRRGGBBAA) to `out` as eight lowercase hex digits.
 void svg_hex(String* out, int64 rgba) {
     string digits = "0123456789abcdef";
     for (int shift = 28; shift >= 0; shift -= 4) { String_push(out, digits[(int)((rgba >> shift) & 15)]); }
@@ -521,8 +551,12 @@ void svg_paint_out(String* out, int kind, int64 color, double alpha) {
 
 // ---- The document ----
 
+// One attribute of an element: its name and its value, owned (freed by
+// svg_free_attributes).
 struct SvgAttr { String name; String value; }
 
+// The value of the attribute `name` in `attrs` (empty for an attribute with no value), or
+// null when it is absent. The string belongs to `attrs`.
 string svg_attr(List<SvgAttr>* attrs, string name) {
     for (i in 0..attrs.size) {
         if (String_eq_cstr(&attrs.data[i].name, name) == 1) { return attrs.data[i].value.data == null ? "" : attrs.data[i].value.data; }
@@ -530,6 +564,7 @@ string svg_attr(List<SvgAttr>* attrs, string name) {
     return null;
 }
 
+// True when the element name text[start..end) is exactly `name`.
 bool svg_name_is(string text, int start, int end, string name) {
     int n = (int)strlen(name);
     return end - start == n && strncmp(&text[start], name, (size_t)n) == 0;
@@ -643,6 +678,7 @@ int svg_attributes(string text, int at, List<SvgAttr>* attrs, *bool closed) {
     return at;
 }
 
+// Frees each attribute's name and value and empties `attrs` (its storage is kept).
 void svg_free_attributes(List<SvgAttr>* attrs) {
     for (i in 0..attrs.size) { String_free(&attrs.data[i].name); String_free(&attrs.data[i].value); }
     attrs.size = 0;
@@ -720,8 +756,11 @@ bool svg_compile(string svg, String* out, *double width, *double height) {
 
 // ---- The element ----
 
+// What an Svg element keeps between renders: the document text it last compiled, its
+// display list and its viewBox size.
 struct SvgCache { String source; String list; double width; double height; }
 
+// Frees an SvgCache and its strings; the Svg element calls it when it goes away.
 void svg_release(*SvgCache cache) {
     String_free(&cache.source);
     String_free(&cache.list);
