@@ -50,6 +50,10 @@ viewBox, then a paint line and a path line per shape), for tests or other render
 `ui run android` or `ui run web`).
 
 
+## Documentation
+
+Every public function and type, with its documentation, is in the [API reference](docs/api.md).
+
 ## Install
 
 In an app made with `ui new`:
