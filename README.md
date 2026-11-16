@@ -59,7 +59,7 @@ Every public function and type, with its documentation, is in the [API reference
 In an app made with `ui new`:
 
 ```bash
-eskiuc add svg --git https://github.com/eskiu-packages/ui-svg --rev v0.1.1
+eskiuc add svg --git https://github.com/eskiu-packages/ui-svg --rev v0.1.2
 ```
 ## Tests
 
