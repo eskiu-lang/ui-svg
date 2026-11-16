@@ -1,4 +1,4 @@
-// <svg>: vector drawings from SVG text, for apps on eskiu-lang/ui. Svg draws a document
+// <svg>: vector drawings from SVG text, for apps on eskiu-packages/ui. Svg draws a document
 // (an icon, a piece, a silhouette) scaled to fit its box, drawn by the platform (Core
 // Graphics on iOS, Canvas on Android, the browser's SVG on the web).
 //
